@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Damn i am lazy - Bopeebo!</title>
+    <link rel="icon" type="image/png" href="icon.png">
+
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background: black;
+        }
+
+        #yapSquad {
+            width: 100vw;
+            height: 100vh;
+            object-fit: cover;
+        }
+
+        .note {
+            position: fixed;
+            image-rendering: pixelated;
+            width: 40px;
+            height: 40px;
+            transform-origin: center;
+            z-index: 9999;
+        }
+
+        .strum {
+            position: fixed;
+            width: 40px;
+            height: 40px;
+            border: 3px solid lime;
+            border-radius: 6px;
+            bottom: 100px;
+            z-index: 10000;
+        }
+    </style>
+</head>
+
+<body>
+
+<video
+    src="./video.mp4"
+    id="yapSquad"
+    onclick="playVideo()">
+</video>
+<script>
+
+const yapSquad = document.getElementById("yapSquad");
+
+const notes = [];
+
+const BPM = 100;
+const beatMs = 60000 / BPM;
+
+const scrollSpeed = 1.3;
+
+const AUDIO_OFFSET = 100;
+const laneOffset = -200;
+
+let chartLoaded = false;
+let renderStarted = false;
+
+const HIT_WINDOW = 180; // instead of 120
+
+const keysHeld = {};
+
+const laneHolding = [false, false, false, false];
+
+const keys = {
+    KeyD: 0,
+    KeyF: 1,
+    KeyJ: 2,
+    KeyK: 3,
+};
+
+const HOLD_GRACE = 200;
+
+const noteElements = {};
+
+// ---------------- CHART ----------------
+
+async function loadChart() {
+    const chartText = await fetch("chart.txt").then(r => r.text());
+
+    const lines = chartText.split("\n");
+
+    for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line.startsWith("?")) continue;
+
+        const [time, lane, hold] = line.substring(1).split("_");
+
+        notes.push({
+            id: Math.random().toString(36).slice(2),
+            time: parseFloat(time),
+            lane: parseInt(lane) - 4,
+            hold: parseFloat(hold) || 0,
+            state: "pending"
+        });
+    }
+
+    console.log("Loaded notes:", notes.length);
+    chartLoaded = true;
+}
+
+// ---------------- MAIN LOOP ----------------
+
+function renderNotes() {
+    requestAnimationFrame(renderNotes);
+
+    if (yapSquad.paused) return;
+    if (!chartLoaded) return;
+
+    const currentMs = (yapSquad.currentTime * 1000) + AUDIO_OFFSET;
+
+    const lanes = 4;
+    const spacing = 100;
+
+    const startX =
+        window.innerWidth / 2 -
+        ((lanes - 1) * spacing) / 2;
+
+    for (const note of notes) {
+
+        if (note.state === "done" || note.state === "missed") {
+            if (note.el) {
+                note.el.remove();
+                note.el = null;
+            }
+            continue;
+        }
+
+        const distance = note.time - currentMs;
+
+        const maxLookAhead = 5000;
+        const maxLookBehind = -2000;
+
+        if (distance < maxLookBehind || distance > maxLookAhead) continue;
+
+        const beats = distance / beatMs;
+
+        // =========================
+        // CREATE ELEMENT
+        // =========================
+        if (!note.el) {
+            note.el = document.createElement("div");
+            note.el.className = "note";
+            document.body.appendChild(note.el);
+        }
+
+        const el = note.el;
+
+        // =========================
+        // BASE STYLE
+        // =========================
+        const isHold = note.hold > 0;
+
+        el.style.position = "fixed";
+        el.style.width = "40px";
+        el.style.zIndex = "9999";
+
+        el.style.left =
+            (startX + note.lane * spacing + laneOffset) + "px";
+
+        el.style.bottom =
+            (beats * 180 * scrollSpeed + 100) + "px";
+
+        // =========================
+        // COLOR (show hold BEFORE hit)
+        // =========================
+        if (isHold) {
+            if (note.state === "holding") {
+                el.style.backgroundColor = "lime";
+            } else {
+                el.style.backgroundColor = "#00aaff"; // preview color
+            }
+        } else {
+            el.style.backgroundColor = "white";
+        }
+
+        el.style.borderRadius = "6px";
+        el.style.boxShadow = "0 0 8px rgba(0,0,0,0.4)";
+
+        // =========================
+        // HOLD VISUAL (FNF STYLE SHRINKING TAIL)
+        // =========================
+        if (isHold) {
+
+            const msToPixels = 0.18 * scrollSpeed;
+
+            const totalHeight = note.hold * msToPixels;
+
+            // progress through hold (0 → 1)
+            let progress = 0;
+
+            if (note.state === "holding") {
+
+                const rawProgress = (currentMs - note.holdStart) / note.hold;
+
+                const clamped = Math.min(Math.max(rawProgress, 0), 1);
+
+                // smoothstep easing (slows start + end, smoother feel)
+                progress = clamped * clamped * (3 - 2 * clamped);
+            }
+
+            // smooth visual shrink
+            const targetHeight = totalHeight * (1 - progress);
+
+            // extra smoothing across frames (prevents jitter)
+            if (note.smoothedHeight === undefined) {
+                note.smoothedHeight = totalHeight;
+            }
+
+            note.smoothedHeight += (targetHeight - note.smoothedHeight) * 5;
+
+            const remainingHeight = note.smoothedHeight;
+            el.style.height = remainingHeight + "px";
+
+            // keep top anchored (FNF feel)
+            el.style.transformOrigin = "bottom";
+
+        } else {
+            el.style.height = "40px";
+        }
+
+        // =========================
+        // HOLD LOGIC
+        // =========================
+        if (note.state === "holding") {
+
+            const holdingKey = laneHolding[note.holdLane];
+            const inHoldPhase = currentMs >= note.holdStart;
+
+            if (inHoldPhase && !holdingKey && currentMs < note.holdEnd) {
+                note.state = "missed";
+                console.log("Dropped hold");
+                continue;
+            }
+
+            if (currentMs >= note.holdEnd) {
+                note.state = "done";
+                console.log("Completed hold");
+                continue;
+            }
+        }
+
+        // =========================
+        // TAP MISS
+        // =========================
+        if (!isHold) {
+            if (note.state === "pending" && currentMs > note.time + HIT_WINDOW) {
+                note.state = "missed";
+            }
+        }
+    }
+}
+
+function isHold(note) {
+    return note.holdEnd > 0;
+}
+
+function getKey(lane) {
+    return ["KeyD","KeyF","KeyJ","KeyK"][lane];
+}
+
+function isLaneHeld(lane) {
+    const map = {
+        0: "KeyD",
+        1: "KeyF",
+        2: "KeyJ",
+        3: "KeyK"
+    };
+
+    return keysHeld[map[lane]];
+}
+
+function createStrums() {
+
+const lanes = 4;
+const spacing = 100;
+
+const startX =
+    window.innerWidth / 2 -
+    ((lanes - 1) * spacing) / 2;
+
+for (let i = 0; i < lanes; i++) {
+
+    const strum = document.createElement("div");
+
+    strum.className = "strum";
+
+    strum.style.left =
+        (startX + i * spacing + laneOffset) + "px";
+
+    document.body.appendChild(strum);
+}
+}
+
+// ---------------- VIDEO CONTROL ----------------
+
+async function playVideo() {
+    if (yapSquad.paused) {
+        await yapSquad.play();
+
+        if (!chartLoaded) {
+            await loadChart();
+        }
+
+        if (!renderStarted) {
+            renderStarted = true;
+            renderNotes();
+        }
+
+    } else {
+        yapSquad.pause();
+    }
+}
+
+// ---------------- INPUT ----------------
+
+document.addEventListener("keydown", (e) => {
+
+const lane = keys[e.code];
+if (lane === undefined) return;
+
+const currentMs = Math.max(0, (yapSquad.currentTime * 1000) + AUDIO_OFFSET);
+
+let bestNote = null;
+let bestDiff = Infinity;
+
+for (const note of notes) {
+
+    if (note.hit || note.missed) continue;
+    if (note.lane !== lane) continue;
+
+    const diff = note.time - currentMs;
+
+    if (Math.abs(diff) <= HIT_WINDOW && Math.abs(diff) < bestDiff) {
+        bestDiff = Math.abs(diff);
+        bestNote = note;
+    }
+}
+
+if (!bestNote) return;
+if (bestNote.state !== "pending") return;
+if (bestNote.hold > 0) {
+    bestNote.state = "holding";
+    bestNote.holdStart = bestNote.time;
+    bestNote.holdEnd = bestNote.time + bestNote.hold;
+    console.log("Started hold");
+} else {
+    bestNote.state = "done";
+    console.log("Hit");
+}
+
+
+});
+
+
+
+document.addEventListener("keydown", (e) => {
+    const lane = keys[e.code];
+    if (lane === undefined) return;
+
+    laneHolding[lane] = true;
+});
+
+document.addEventListener("keyup", (e) => {
+    const lane = keys[e.code];
+    if (lane === undefined) return;
+
+    laneHolding[lane] = false;
+});
+
+
+
+
+
+
+// ---------------- START ----------------
+
+loadChart().then(() => {
+
+createStrums();
+
+console.log("Chart loaded, waiting for video start");
+});
+
+</script>
+
+</body>
+</html>
